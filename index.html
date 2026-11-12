@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>فاحص الاتصال</title>
+<style>
+body{font-family:sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:12px}
+.card{background:#1e293b;border-radius:12px;padding:12px;margin-bottom:12px}
+button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:10px;margin:4px 0;font-size:16px;width:100%}
+textarea{width:100%;height:70px;background:#0f172a;color:#e2e8f0;border:1px solid #475569;border-radius:8px;box-sizing:border-box}
+.ok{color:#4ade80}.bad{color:#f87171}.warn{color:#fbbf24}
+#log{font-size:13px;white-space:pre-wrap;max-height:220px;overflow:auto;direction:ltr;text-align:left}
+</style>
+</head>
+<body>
+<div class="card">
+<h3>1) اسمح بالمايك (علشان المتصفح يظهر الـ IP الحقيقي)</h3>
+<button onclick="allowIP()">اسمح</button>
+</div>
+
+<div class="card">
+<h3>2) اللي هيبدأ (واحد بس فيكم)</h3>
+<button onclick="startHost()">اعمل كود الدعوة</button>
+<textarea id="offer" placeholder="كود الدعوة هيظهر هنا — انسخه وابعته لصاحبك" readonly></textarea>
+<textarea id="answerIn" placeholder="الصق هنا كود الرد من صاحبك"></textarea>
+<button onclick="finishHost()">اتصل</button>
+</div>
+
+<div class="card">
+<h3>3) اللي هينضم (التاني)</h3>
+<textarea id="offerIn" placeholder="الصق هنا كود الدعوة"></textarea>
+<button onclick="joinGuest()">اعمل كود الرد</button>
+<textarea id="answer" placeholder="كود الرد هيظهر هنا — ابعته لصاحبك" readonly></textarea>
+</div>
+
+<div class="card"><h3>الإحصائيات</h3><div id="stats">لسه مفيش اتصال</div></div>
+<div class="card"><h3>السجل والأخطاء</h3><div id="log"></div></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let pc,dc,pingTimer,statTimer,sent=0,got=0,rtts=[],info='';
+const log=(m,c='')=>{$('log').innerHTML+=`<span class="${c}">[${new Date().toLocaleTimeString()}] ${m}</span>\n`;$('log').scrollTop=1e9;};
+const isTS=ip=>!!ip&&(/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)||ip.toLowerCase().startsWith('fd7a:115c:a1e0'));
+
+async function allowIP(){
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({audio:true});
+    s.getTracks().forEach(t=>t.stop());
+    log('تم السماح ✔','ok');
+  }catch(e){log('رفضت الإذن ('+e.name+') — من غيره ممكن الاتصال يفشل','bad');}
+}
+
+function makePC(){
+  pc=new RTCPeerConnection({iceServers:[]}); // من غير STUN: النجاح معناه إن في طريق مباشر
+  pc.onicecandidate=e=>{
+    if(!e.candidate)return;
+    const ip=e.candidate.address||'';
+    if(!ip||ip.endsWith('.local')) log('عنوان مخفي — اضغط "اسمح" في الخطوة 1 وابدأ من الأول','warn');
+    else log('عنوان جهازك: '+ip+(isTS(ip)?' ← Tailscale ✔':''),isTS(ip)?'ok':'');
+  };
+  pc.onicecandidateerror=e=>log('خطأ ICE: '+(e.errorText||e.errorCode),'bad');
+  pc.oniceconnectionstatechange=()=>{
+    const s=pc.iceConnectionState;
+    log('ICE: '+s,s==='failed'?'bad':'');
+    if(s==='failed')log('فشل: مفيش طريق مباشر بينكم. اتأكد إن Tailscale شغال وConnected عند الاتنين، وإن كل واحد سمح بالمايك.','bad');
+  };
+  pc.onconnectionstatechange=()=>{
+    log('الاتصال: '+pc.connectionState,pc.connectionState==='connected'?'ok':'');
+    if(pc.connectionState==='connected'){clearInterval(statTimer);statTimer=setInterval(refresh,1500);}
+  };
+}
+
+function waitGather(){
+  return new Promise(r=>{
+    if(pc.iceGatheringState==='complete')return r();
+    pc.addEventListener('icegatheringstatechange',()=>{if(pc.iceGatheringState==='complete')r();});
+    setTimeout(r,4000);
+  });
+}
+
+async function startHost(){
+  try{
+    makePC();dc=pc.createDataChannel('t');setupDC();
+    await pc.setLocalDescription(await pc.createOffer());
+    await waitGather();
+    $('offer').value=btoa(JSON.stringify(pc.localDescription));
+    log('انسخ كود الدعوة وابعته لصاحبك، وبعدين الصق رده','ok');
+  }catch(e){log('خطأ: '+e.message,'bad');}
+}
+async function finishHost(){
+  try{await pc.setRemoteDescription(JSON.parse(atob($('answerIn').value.trim())));}
+  catch(e){log('كود الرد غلط: '+e.message,'bad');}
+}
+async function joinGuest(){
+  try{
+    makePC();pc.ondatachannel=e=>{dc=e.channel;setupDC();};
+    await pc.setRemoteDescription(JSON.parse(atob($('offerIn').value.trim())));
+    await pc.setLocalDescription(await pc.createAnswer());
+    await waitGather();
+    $('answer').value=btoa(JSON.stringify(pc.localDescription));
+    log('انسخ كود الرد وابعته لصاحبك','ok');
+  }catch(e){log('كود الدعوة غلط: '+e.message,'bad');}
+}
+
+function setupDC(){
+  dc.onopen=()=>{
+    log('قناة البيانات اتفتحت ✔','ok');
+    pingTimer=setInterval(()=>{
+      if(dc.readyState!=='open')return;
+      sent++;dc.send(JSON.stringify({t:'p',n:sent,ts:performance.now()}));
+    },1000);
+  };
+  dc.onclose=()=>{log('القناة اتقفلت','bad');clearInterval(pingTimer);};
+  dc.onerror=()=>log('خطأ في قناة البيانات','bad');
+  dc.onmessage=e=>{
+    const m=JSON.parse(e.data);
+    if(m.t==='p')dc.send(JSON.stringify({t:'r',n:m.n,ts:m.ts}));
+    else{got++;rtts.push(performance.now()-m.ts);if(rtts.length>30)rtts.shift();render();}
+  };
+}
+
+async function refresh(){
+  const st=await pc.getStats();let pair;const L={},R={};
+  st.forEach(r=>{
+    if(r.type==='transport'&&r.selectedCandidatePairId)pair=st.get(r.selectedCandidatePairId);
+    if(r.type==='local-candidate')L[r.id]=r;
+    if(r.type==='remote-candidate')R[r.id]=r;
+  });
+  if(!pair)st.forEach(r=>{if(r.type==='candidate-pair'&&r.state==='succeeded'&&r.nominated)pair=r;});
+  if(pair){
+    const l=L[pair.localCandidateId]||{},r=R[pair.remoteCandidateId]||{};
+    const lip=l.address||l.ip,rip=r.address||r.ip;
+    const ts=isTS(lip)&&isTS(rip);
+    info=`<b>جهازك:</b> ${lip}<br><b>جهاز صاحبك:</b> ${rip}<br>`+
+      (ts?'<span class="ok">✔ متصلين فعلاً عن طريق Tailscale</span>'
+         :'<span class="warn">⚠ متصلين، بس مش عن طريق Tailscale (ممكن نفس الواي فاي)</span>');
+  }
+  render();
+}
+
+function render(){
+  let h=info;
+  if(rtts.length){
+    const a=rtts.reduce((x,y)=>x+y)/rtts.length;
+    h+=`<br><b>بينج:</b> متوسط ${a.toFixed(0)}ms | أقل ${Math.min(...rtts).toFixed(0)} | أعلى ${Math.max(...rtts).toFixed(0)}`;
+    h+=`<br><b>رسائل:</b> اتبعت ${sent} / رجع ${got} / ضايع ${Math.max(0,sent-got-1)}`;
+    if(a>150)h+='<br><span class="warn">⚠ البينج عالي — غالباً Tailscale بيمرر عن طريق سيرفر وسيط (Relay) واللعب هيبقى تقيل</span>';
+  }
+  $('stats').innerHTML=h||'لسه مفيش اتصال';
+}
+</script>
+</body>
+</html>
